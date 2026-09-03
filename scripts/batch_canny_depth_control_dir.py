@@ -10,10 +10,11 @@ Example:
         --format .jpeg \
         --output_dir /data/output
 
-Expected local model layout:
-    /cluster/models/sd3-medium
-    /cluster/models/sd3-canny
-    /cluster/models/sd3-depth
+All models are loaded directly from the Hugging Face Hub:
+    stabilityai/stable-diffusion-3-medium-diffusers
+    InstantX/SD3-Controlnet-Canny
+    InstantX/SD3-Controlnet-Depth
+    Intel/dpt-hybrid-midas
 """
 
 import argparse
@@ -25,14 +26,17 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from diffusers import StableDiffusion3ControlNetPipeline
 from diffusers.models import SD3ControlNetModel, SD3MultiControlNetModel
+from transformers import DPTForDepthEstimation, DPTImageProcessor
 
 
-DEFAULT_SD3_MODEL = "/cluster/models/sd3-medium"
-DEFAULT_CANNY_MODEL = "/cluster/models/sd3-canny"
-DEFAULT_DEPTH_MODEL = "/cluster/models/sd3-depth"
+DEFAULT_SD3_MODEL = "stabilityai/stable-diffusion-3-medium-diffusers"
+DEFAULT_CANNY_MODEL = "InstantX/SD3-Controlnet-Canny"
+DEFAULT_DEPTH_MODEL = "InstantX/SD3-Controlnet-Depth"
+DEFAULT_DEPTH_ESTIMATOR_MODEL = "Intel/dpt-hybrid-midas"
 
 DEFAULT_WIDTH = 1024
 DEFAULT_HEIGHT = 1024
@@ -60,6 +64,7 @@ def parse_args():
     )
     parser.add_argument(
         "-content_dir",
+        "--content_dir",
         required=True,
         type=Path,
         help="Directory containing source images.",
@@ -78,21 +83,30 @@ def parse_args():
 
     parser.add_argument(
         "--sd3_model",
-        type=Path,
-        default=Path(DEFAULT_SD3_MODEL),
-        help=f"Local SD3 Medium model path (default: {DEFAULT_SD3_MODEL}).",
+        type=str,
+        default=DEFAULT_SD3_MODEL,
+        help=f"SD3 Medium repo ID or local path (default: {DEFAULT_SD3_MODEL}).",
     )
     parser.add_argument(
         "--canny_model",
-        type=Path,
-        default=Path(DEFAULT_CANNY_MODEL),
-        help=f"Local SD3 Canny ControlNet path (default: {DEFAULT_CANNY_MODEL}).",
+        type=str,
+        default=DEFAULT_CANNY_MODEL,
+        help=f"Canny ControlNet repo ID or local path (default: {DEFAULT_CANNY_MODEL}).",
     )
     parser.add_argument(
         "--depth_model",
-        type=Path,
-        default=Path(DEFAULT_DEPTH_MODEL),
-        help=f"Local SD3 Depth ControlNet path (default: {DEFAULT_DEPTH_MODEL}).",
+        type=str,
+        default=DEFAULT_DEPTH_MODEL,
+        help=f"Depth ControlNet repo ID or local path (default: {DEFAULT_DEPTH_MODEL}).",
+    )
+    parser.add_argument(
+        "--depth_estimator_model",
+        type=str,
+        default=DEFAULT_DEPTH_ESTIMATOR_MODEL,
+        help=(
+            "Depth-estimation repo ID or local path used to compute depth maps "
+            f"on the fly (default: {DEFAULT_DEPTH_ESTIMATOR_MODEL})."
+        ),
     )
     parser.add_argument(
         "--steps",
@@ -172,9 +186,33 @@ def make_canny(image):
     return Image.fromarray(edges)
 
 
-def prepare_depth(path, size):
-    depth = Image.open(path).convert("L")
-    depth = depth.resize(size, Image.Resampling.BILINEAR)
+def load_depth_estimator(args):
+    processor = DPTImageProcessor.from_pretrained(args.depth_estimator_model)
+    model = DPTForDepthEstimation.from_pretrained(args.depth_estimator_model)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    model.eval()
+    return processor, model, device
+
+
+def prepare_depth(image, processor, model, device, size):
+    inputs = processor(images=image, return_tensors="pt")
+    inputs = {name: value.to(device) for name, value in inputs.items()}
+
+    with torch.inference_mode():
+        depth = model(**inputs).predicted_depth
+
+    depth = depth.unsqueeze(1)
+    depth = F.interpolate(
+        depth,
+        size=size,
+        mode="bicubic",
+        align_corners=False,
+    )[0, 0]
+    depth = depth - depth.min()
+    depth = depth / depth.max().clamp(min=1e-6)
+    depth = (depth * 255.0).clamp(0, 255).to(torch.uint8).cpu().numpy()
+    depth = Image.fromarray(depth, mode="L")
     return Image.merge("RGB", (depth, depth, depth))
 
 
@@ -212,7 +250,7 @@ def load_pipeline(args):
     return pipe
 
 
-def process_image(pipe, input_path, output_path, args, guidance_scale):
+def process_image(pipe, depth_processor, depth_model, depth_device, input_path, output_path, args, guidance_scale):
     image = Image.open(input_path).convert("RGB")
     image = image.resize(
         (args.width, args.height),
@@ -221,7 +259,10 @@ def process_image(pipe, input_path, output_path, args, guidance_scale):
 
     canny = make_canny(image)
     depth = prepare_depth(
-        input_path,
+        image,
+        depth_processor,
+        depth_model,
+        depth_device,
         (args.width, args.height),
     )
 
@@ -268,6 +309,7 @@ def main():
             f"No files with format '{image_format}' found in {content_dir}"
         )
 
+    depth_processor, depth_model, depth_device = load_depth_estimator(args)
     pipe = load_pipeline(args)
     guidance_scale = transfer_to_guidance(args.scale)
 
@@ -285,6 +327,9 @@ def main():
 
         process_image(
             pipe,
+            depth_processor,
+            depth_model,
+            depth_device,
             input_path,
             output_path,
             args,

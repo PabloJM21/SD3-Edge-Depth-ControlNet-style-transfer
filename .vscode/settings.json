@@ -1,0 +1,40 @@
+{
+    "update.mode":  "none",
+    "editor.inlineSuggest.enabled": true,
+    "update.showReleaseNotes":  false,
+    "update.enableWindowsBackgroundUpdates":  false,
+    "json.schemaDownload.enable":  true,
+    "chat.agent.enabled":  true,
+    "npm.fetchOnlinePackageInfo":  true,
+    "extensions.autoUpdate":  true,
+    "telemetry.telemetryLevel":  "off",
+    "chat.commandCenter.enabled":  true,
+    "workbench.settings.enableNaturalLanguageSearch":  true,
+    "extensions.autoCheckUpdates":  true,
+    "inlineChat.accessibleDiffView":  "off",
+    "telemetry.editStats.enabled": false,
+    "terminal.integrated.initialHint":  false,
+    "workbench.enableExperiments":  true,
+    "telemetry.feedback.enabled": false,
+    "github.copilot.enable": {
+        "*": true,
+        "plaintext": false,
+        "markdown": false,
+        "scminput": false
+    },
+    "github.copilot.nextEditSuggestions.enabled": true,
+    "github.copilot.chat.reviewSelection.instructions": [
+
+    ],
+    "github.copilot.chat.codesearch.enabled": true,
+    "github.copilot.chat.commitMessageGeneration.instructions": [
+
+
+
+    ],
+    "github.copilot.chat.customOAIModels": {},
+    "github.copilot.chat.completionsFetcher": "electron-fetch",
+    "github.copilot.chat.anthropic.tools.websearch.userLocation": {
+        
+    }
+}
