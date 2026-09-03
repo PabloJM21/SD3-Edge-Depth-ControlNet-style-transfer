@@ -20,8 +20,10 @@ All models are loaded directly from the Hugging Face Hub:
 """
 
 import argparse
+import inspect
 import os
 from pathlib import Path
+import textwrap
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -54,6 +56,41 @@ DEFAULT_STEPS = 28
 DEFAULT_CANNY_SCALE = 1.0
 DEFAULT_DEPTH_SCALE = 1.0
 DEFAULT_SEED = 1234
+
+
+def patch_sd3_ip_adapter_view_bug():
+    """Patch known SD3 IP-Adapter view/stride bug in some diffusers versions."""
+    try:
+        from diffusers.models import attention_processor as ap
+    except Exception:
+        return
+
+    cls = getattr(ap, "SD3IPAdapterJointAttnProcessor2_0", None)
+    if cls is None:
+        return
+
+    try:
+        src = inspect.getsource(cls.__call__)
+    except (OSError, TypeError):
+        return
+
+    needle = ".view(batch_size, -1, attn.heads * head_dim)"
+    if needle not in src:
+        return
+
+    patched_src = src.replace(
+        needle,
+        ".reshape(batch_size, -1, attn.heads * head_dim)",
+    )
+
+    namespace = {}
+    exec(
+        textwrap.dedent(patched_src),
+        cls.__call__.__globals__,
+        namespace,
+    )
+    cls.__call__ = namespace["__call__"]
+    print("Applied compatibility patch for SD3 IP-Adapter attention processor.")
 
 
 def parse_args():
@@ -365,6 +402,7 @@ def process_image(
 
 
 def main():
+    patch_sd3_ip_adapter_view_bug()
     args = parse_args()
 
     content_dir = args.content_dir
