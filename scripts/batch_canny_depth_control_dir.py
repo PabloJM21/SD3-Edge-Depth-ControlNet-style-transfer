@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Batch SD3 Medium + Canny + Depth ControlNet style transfer.
+Batch SD3.5 Large + Canny + Depth ControlNet + IP-Adapter style transfer.
 
 Example:
     python batch_canny_depth_control_dir.py \
@@ -11,10 +11,12 @@ Example:
         --output_dir /data/output
 
 All models are loaded directly from the Hugging Face Hub:
-    stabilityai/stable-diffusion-3-medium-diffusers
+    stabilityai/stable-diffusion-3.5-large
     InstantX/SD3-Controlnet-Canny
     InstantX/SD3-Controlnet-Depth
     Intel/dpt-hybrid-midas
+    google/siglip-so400m-patch14-384
+    InstantX/SD3.5-Large-IP-Adapter
 """
 
 import argparse
@@ -30,13 +32,20 @@ import torch.nn.functional as F
 from PIL import Image
 from diffusers import StableDiffusion3ControlNetPipeline
 from diffusers.models import SD3ControlNetModel, SD3MultiControlNetModel
-from transformers import DPTForDepthEstimation, DPTImageProcessor
+from transformers import (
+    DPTForDepthEstimation,
+    DPTImageProcessor,
+    SiglipImageProcessor,
+    SiglipVisionModel,
+)
 
 
-DEFAULT_SD3_MODEL = "stabilityai/stable-diffusion-3-medium-diffusers"
+DEFAULT_SD3_MODEL = "stabilityai/stable-diffusion-3.5-large"
 DEFAULT_CANNY_MODEL = "InstantX/SD3-Controlnet-Canny"
 DEFAULT_DEPTH_MODEL = "InstantX/SD3-Controlnet-Depth"
 DEFAULT_DEPTH_ESTIMATOR_MODEL = "Intel/dpt-hybrid-midas"
+DEFAULT_IMAGE_ENCODER = "google/siglip-so400m-patch14-384"
+DEFAULT_IP_ADAPTER_CHECKPOINT = "InstantX/SD3.5-Large-IP-Adapter"
 
 DEFAULT_WIDTH = 1024
 DEFAULT_HEIGHT = 1024
@@ -48,7 +57,7 @@ DEFAULT_SEED = 1234
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Batch SD3 Medium style transfer with Canny + Depth ControlNet."
+        description="Batch SD3.5 Large style transfer with Canny + Depth ControlNet + IP-Adapter."
     )
 
     parser.add_argument(
@@ -80,12 +89,18 @@ def parse_args():
         type=Path,
         help="Directory receiving the generated images.",
     )
+    parser.add_argument(
+        "--style_image",
+        required=True,
+        type=Path,
+        help="Reference style image used by IP-Adapter.",
+    )
 
     parser.add_argument(
         "--sd3_model",
         type=str,
         default=DEFAULT_SD3_MODEL,
-        help=f"SD3 Medium repo ID or local path (default: {DEFAULT_SD3_MODEL}).",
+        help=f"SD3.5 Large repo ID or local path (default: {DEFAULT_SD3_MODEL}).",
     )
     parser.add_argument(
         "--canny_model",
@@ -107,6 +122,27 @@ def parse_args():
             "Depth-estimation repo ID or local path used to compute depth maps "
             f"on the fly (default: {DEFAULT_DEPTH_ESTIMATOR_MODEL})."
         ),
+    )
+    parser.add_argument(
+        "--image_encoder_model",
+        type=str,
+        default=DEFAULT_IMAGE_ENCODER,
+        help=f"SigLIP image encoder repo ID or local path (default: {DEFAULT_IMAGE_ENCODER}).",
+    )
+    parser.add_argument(
+        "--ip_adapter_checkpoint",
+        type=str,
+        default=DEFAULT_IP_ADAPTER_CHECKPOINT,
+        help=(
+            "SD3.5 Large IP-Adapter checkpoint repo ID or local path "
+            f"(default: {DEFAULT_IP_ADAPTER_CHECKPOINT})."
+        ),
+    )
+    parser.add_argument(
+        "--ip_adapter_scale",
+        type=float,
+        default=0.5,
+        help="IP-Adapter conditioning strength (default: 0.5).",
     )
     parser.add_argument(
         "--steps",
@@ -156,11 +192,17 @@ def parse_args():
     if not 0.0 <= args.depth_scale:
         parser.error("--depth-scale must be >= 0.")
 
+    if not 0.0 <= args.ip_adapter_scale:
+        parser.error("--ip_adapter_scale must be >= 0.")
+
     if args.steps <= 0:
         parser.error("--steps must be > 0.")
 
     if args.width <= 0 or args.height <= 0:
         parser.error("--width and --height must be > 0.")
+
+    if not args.style_image.is_file():
+        parser.error(f"Style image does not exist: {args.style_image}")
 
     return args
 
@@ -233,13 +275,25 @@ def load_pipeline(args):
         [canny_controlnet, depth_controlnet]
     )
 
+    feature_extractor = SiglipImageProcessor.from_pretrained(
+        args.image_encoder_model,
+    )
+    image_encoder = SiglipVisionModel.from_pretrained(
+        args.image_encoder_model,
+        torch_dtype=dtype,
+    )
+
     pipe = StableDiffusion3ControlNetPipeline.from_pretrained(
         args.sd3_model,
         controlnet=controlnet,
+        feature_extractor=feature_extractor,
+        image_encoder=image_encoder,
         torch_dtype=dtype,
     )
 
     pipe = pipe.to("cuda")
+    pipe.load_ip_adapter(args.ip_adapter_checkpoint)
+    pipe.set_ip_adapter_scale(args.ip_adapter_scale)
 
     # Force ordinary PyTorch attention. No FlashAttention/xFormers/
     # Transformer Engine dependency is required.
@@ -250,7 +304,17 @@ def load_pipeline(args):
     return pipe
 
 
-def process_image(pipe, depth_processor, depth_model, depth_device, input_path, output_path, args, guidance_scale):
+def process_image(
+    pipe,
+    depth_processor,
+    depth_model,
+    depth_device,
+    style_image,
+    input_path,
+    output_path,
+    args,
+    guidance_scale,
+):
     image = Image.open(input_path).convert("RGB")
     image = image.resize(
         (args.width, args.height),
@@ -276,6 +340,7 @@ def process_image(pipe, depth_processor, depth_model, depth_device, input_path, 
                 args.canny_scale,
                 args.depth_scale,
             ],
+            ip_adapter_image=style_image,
             height=args.height,
             width=args.width,
             num_inference_steps=args.steps,
@@ -309,6 +374,8 @@ def main():
             f"No files with format '{image_format}' found in {content_dir}"
         )
 
+    style_image = Image.open(args.style_image).convert("RGB")
+
     depth_processor, depth_model, depth_device = load_depth_estimator(args)
     pipe = load_pipeline(args)
     guidance_scale = transfer_to_guidance(args.scale)
@@ -316,6 +383,7 @@ def main():
     print(f"Found {len(input_files)} input file(s).")
     print(f"Prompt transfer scale: {args.scale}")
     print(f"SD3 guidance scale:    {guidance_scale:.3f}")
+    print(f"IP-Adapter scale:      {args.ip_adapter_scale}")
 
     for index, input_path in enumerate(input_files, start=1):
         output_path = output_dir / input_path.name
@@ -330,6 +398,7 @@ def main():
             depth_processor,
             depth_model,
             depth_device,
+            style_image,
             input_path,
             output_path,
             args,
