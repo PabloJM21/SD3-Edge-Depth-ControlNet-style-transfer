@@ -46,6 +46,7 @@ DEFAULT_DEPTH_MODEL = "InstantX/SD3-Controlnet-Depth"
 DEFAULT_DEPTH_ESTIMATOR_MODEL = "Intel/dpt-hybrid-midas"
 DEFAULT_IMAGE_ENCODER = "google/siglip-so400m-patch14-384"
 DEFAULT_IP_ADAPTER_CHECKPOINT = "InstantX/SD3.5-Large-IP-Adapter"
+DEFAULT_IP_ADAPTER_WEIGHT_NAME = "ip-adapter.bin"
 
 DEFAULT_WIDTH = 1024
 DEFAULT_HEIGHT = 1024
@@ -136,6 +137,15 @@ def parse_args():
         help=(
             "SD3.5 Large IP-Adapter checkpoint repo ID or local path "
             f"(default: {DEFAULT_IP_ADAPTER_CHECKPOINT})."
+        ),
+    )
+    parser.add_argument(
+        "--ip_adapter_weight_name",
+        type=str,
+        default=DEFAULT_IP_ADAPTER_WEIGHT_NAME,
+        help=(
+            "IP-Adapter weight filename inside the checkpoint repo/path "
+            f"(default: {DEFAULT_IP_ADAPTER_WEIGHT_NAME})."
         ),
     )
     parser.add_argument(
@@ -292,7 +302,10 @@ def load_pipeline(args):
     )
 
     pipe = pipe.to("cuda")
-    pipe.load_ip_adapter(args.ip_adapter_checkpoint)
+    pipe.load_ip_adapter(
+        args.ip_adapter_checkpoint,
+        weight_name=args.ip_adapter_weight_name,
+    )
     pipe.set_ip_adapter_scale(args.ip_adapter_scale)
 
     # Force ordinary PyTorch attention. No FlashAttention/xFormers/
