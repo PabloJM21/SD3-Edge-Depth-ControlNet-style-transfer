@@ -12,40 +12,36 @@ Example:
 
 All models are loaded directly from the Hugging Face Hub:
     stabilityai/stable-diffusion-3.5-large
-    InstantX/SD3-Controlnet-Canny
-    InstantX/SD3-Controlnet-Depth
-    Intel/dpt-hybrid-midas
+    stabilityai/stable-diffusion-3.5-large-controlnet-canny
+    stabilityai/stable-diffusion-3.5-large-controlnet-depth
+    depth-anything/Depth-Anything-V2-Large-hf
     google/siglip-so400m-patch14-384
     InstantX/SD3.5-Large-IP-Adapter
 """
 
 import argparse
-import inspect
 import os
 from pathlib import Path
-import textwrap
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import cv2
 import numpy as np
 import torch
-import torch.nn.functional as F
 from PIL import Image
 from diffusers import StableDiffusion3ControlNetPipeline
 from diffusers.models import SD3ControlNetModel, SD3MultiControlNetModel
+from image_gen_aux import DepthPreprocessor
 from transformers import (
-    DPTForDepthEstimation,
-    DPTImageProcessor,
     SiglipImageProcessor,
     SiglipVisionModel,
 )
 
 
 DEFAULT_SD3_MODEL = "stabilityai/stable-diffusion-3.5-large"
-DEFAULT_CANNY_MODEL = "InstantX/SD3-Controlnet-Canny"
-DEFAULT_DEPTH_MODEL = "InstantX/SD3-Controlnet-Depth"
-DEFAULT_DEPTH_ESTIMATOR_MODEL = "Intel/dpt-hybrid-midas"
+DEFAULT_CANNY_MODEL = "stabilityai/stable-diffusion-3.5-large-controlnet-canny"
+DEFAULT_DEPTH_MODEL = "stabilityai/stable-diffusion-3.5-large-controlnet-depth"
+DEFAULT_DEPTH_ESTIMATOR_MODEL = "depth-anything/Depth-Anything-V2-Large-hf"
 DEFAULT_IMAGE_ENCODER = "google/siglip-so400m-patch14-384"
 DEFAULT_IP_ADAPTER_CHECKPOINT = "InstantX/SD3.5-Large-IP-Adapter"
 DEFAULT_IP_ADAPTER_WEIGHT_NAME = "ip-adapter.bin"
@@ -56,41 +52,6 @@ DEFAULT_STEPS = 28
 DEFAULT_CANNY_SCALE = 1.0
 DEFAULT_DEPTH_SCALE = 1.0
 DEFAULT_SEED = 1234
-
-
-def patch_sd3_ip_adapter_view_bug():
-    """Patch known SD3 IP-Adapter view/stride bug in some diffusers versions."""
-    try:
-        from diffusers.models import attention_processor as ap
-    except Exception:
-        return
-
-    cls = getattr(ap, "SD3IPAdapterJointAttnProcessor2_0", None)
-    if cls is None:
-        return
-
-    try:
-        src = inspect.getsource(cls.__call__)
-    except (OSError, TypeError):
-        return
-
-    needle = ".view(batch_size, -1, attn.heads * head_dim)"
-    if needle not in src:
-        return
-
-    patched_src = src.replace(
-        needle,
-        ".reshape(batch_size, -1, attn.heads * head_dim)",
-    )
-
-    namespace = {}
-    exec(
-        textwrap.dedent(patched_src),
-        cls.__call__.__globals__,
-        namespace,
-    )
-    cls.__call__ = namespace["__call__"]
-    print("Applied compatibility patch for SD3 IP-Adapter attention processor.")
 
 
 def parse_args():
@@ -276,33 +237,15 @@ def make_canny(image):
 
 
 def load_depth_estimator(args):
-    processor = DPTImageProcessor.from_pretrained(args.depth_estimator_model)
-    model = DPTForDepthEstimation.from_pretrained(args.depth_estimator_model)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
-    model.eval()
-    return processor, model, device
+    preprocessor = DepthPreprocessor.from_pretrained(args.depth_estimator_model)
+    preprocessor = preprocessor.to(device)
+    return preprocessor, device
 
 
-def prepare_depth(image, processor, model, device, size):
-    inputs = processor(images=image, return_tensors="pt")
-    inputs = {name: value.to(device) for name, value in inputs.items()}
-
-    with torch.inference_mode():
-        depth = model(**inputs).predicted_depth
-
-    depth = depth.unsqueeze(1)
-    depth = F.interpolate(
-        depth,
-        size=size,
-        mode="bicubic",
-        align_corners=False,
-    )[0, 0]
-    depth = depth - depth.min()
-    depth = depth / depth.max().clamp(min=1e-6)
-    depth = (depth * 255.0).clamp(0, 255).to(torch.uint8).cpu().numpy()
-    depth = Image.fromarray(depth, mode="L")
-    return Image.merge("RGB", (depth, depth, depth))
+def prepare_depth(image, preprocessor, size):
+    depth = preprocessor(image, invert=True)[0].convert("RGB")
+    return depth.resize(size, Image.Resampling.BILINEAR)
 
 
 def load_pipeline(args):
@@ -356,9 +299,7 @@ def load_pipeline(args):
 
 def process_image(
     pipe,
-    depth_processor,
-    depth_model,
-    depth_device,
+    depth_preprocessor,
     style_image,
     input_path,
     output_path,
@@ -374,9 +315,7 @@ def process_image(
     canny = make_canny(image)
     depth = prepare_depth(
         image,
-        depth_processor,
-        depth_model,
-        depth_device,
+        depth_preprocessor,
         (args.width, args.height),
     )
 
@@ -402,7 +341,6 @@ def process_image(
 
 
 def main():
-    patch_sd3_ip_adapter_view_bug()
     args = parse_args()
 
     content_dir = args.content_dir
@@ -427,7 +365,7 @@ def main():
 
     style_image = Image.open(args.style_image).convert("RGB")
 
-    depth_processor, depth_model, depth_device = load_depth_estimator(args)
+    depth_preprocessor, _ = load_depth_estimator(args)
     pipe = load_pipeline(args)
     guidance_scale = transfer_to_guidance(args.scale)
 
@@ -446,9 +384,7 @@ def main():
 
         process_image(
             pipe,
-            depth_processor,
-            depth_model,
-            depth_device,
+            depth_preprocessor,
             style_image,
             input_path,
             output_path,

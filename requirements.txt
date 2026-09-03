@@ -11,3 +11,4 @@ torch>=2.4,<3
 torchvision>=0.19,<1
 transformers>=4.46.0
 huggingface-hub>=0.24.0
+image-gen-aux @ git+https://github.com/huggingface/image_gen_aux.git
