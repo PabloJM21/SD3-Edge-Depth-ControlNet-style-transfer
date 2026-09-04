@@ -222,6 +222,23 @@ def parse_args():
         help=f"Generation height (default: {DEFAULT_HEIGHT}).",
     )
 
+
+
+    parser.add_argument(
+        "--save_canny_dir",
+        type=Path,
+        default=None,
+        help="Optional directory to save computed canny maps."
+    )
+
+    parser.add_argument(
+        "--save_depth_dir",
+        type=Path,
+        default=None,
+        help="Optional directory to save computed depth maps."
+    )
+
+
     args = parser.parse_args()
 
     if not 0.0 <= args.scale <= 1.0:
@@ -352,6 +369,14 @@ def process_image(
         (args.width, args.height),
     )
 
+    # --- save maps if directories provided ---
+    if args.save_canny_dir is not None:
+        canny.save(args.save_canny_dir / input_path.name)
+
+    if args.save_depth_dir is not None:
+        depth.save(args.save_depth_dir / input_path.name)
+    # ------------------------------------------------
+
     generator = torch.Generator(device="cuda").manual_seed(args.seed)
 
     with torch.inference_mode():
@@ -373,6 +398,7 @@ def process_image(
     result.images[0].save(output_path)
 
 
+
 def main():
     patch_sd3_ip_adapter_view_bug()
     args = parse_args()
@@ -385,6 +411,14 @@ def main():
         raise SystemExit(f"Input directory does not exist: {content_dir}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
+
+
+    if args.save_canny_dir is not None:
+        args.save_canny_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.save_depth_dir is not None:
+        args.save_depth_dir.mkdir(parents=True, exist_ok=True)
+
 
     # Match only files whose extension exactly matches --format.
     input_files = sorted(
