@@ -16,6 +16,7 @@ All models are loaded directly from the Hugging Face Hub:
     stabilityai/stable-diffusion-3.5-large
     stabilityai/stable-diffusion-3.5-large-controlnet-canny
     stabilityai/stable-diffusion-3.5-large-controlnet-depth
+    depth-anything/Depth-Anything-V2-Large-hf
     google/siglip-so400m-patch14-384
     InstantX/SD3.5-Large-IP-Adapter
 """
@@ -23,7 +24,6 @@ All models are loaded directly from the Hugging Face Hub:
 import argparse
 import csv
 import inspect
-import math
 import os
 from pathlib import Path
 import textwrap
@@ -37,6 +37,7 @@ from PIL import Image
 from diffusers import StableDiffusion3ControlNetPipeline
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.models import SD3ControlNetModel, SD3MultiControlNetModel
+from image_gen_aux import DepthPreprocessor
 from transformers import (
     SiglipImageProcessor,
     SiglipVisionModel,
@@ -46,6 +47,7 @@ from transformers import (
 DEFAULT_SD3_MODEL = "stabilityai/stable-diffusion-3.5-large"
 DEFAULT_CANNY_MODEL = "stabilityai/stable-diffusion-3.5-large-controlnet-canny"
 DEFAULT_DEPTH_MODEL = "stabilityai/stable-diffusion-3.5-large-controlnet-depth"
+DEFAULT_DEPTH_ESTIMATOR_MODEL = "depth-anything/Depth-Anything-V2-Large-hf"
 DEFAULT_IMAGE_ENCODER = "google/siglip-so400m-patch14-384"
 DEFAULT_IP_ADAPTER_CHECKPOINT = "InstantX/SD3.5-Large-IP-Adapter"
 DEFAULT_IP_ADAPTER_WEIGHT_NAME = "ip-adapter.bin"
@@ -56,7 +58,6 @@ DEFAULT_STEPS = 28
 DEFAULT_CANNY_SCALE = 1.0
 DEFAULT_DEPTH_SCALE = 1.0
 DEFAULT_SEED = 1234
-DEFAULT_HORIZONTAL_FOV = 70.0
 
 
 class SD3CannyImageProcessor(VaeImageProcessor):
@@ -203,7 +204,7 @@ def parse_args():
         type=Path,
         help=(
             "CSV mapping image names to slant_distance "
-            "(in kilometers) plus yaw/pitch/roll (in degrees)."
+            "in kilometers."
         ),
     )
 
@@ -234,6 +235,17 @@ def parse_args():
         help=(
             "Depth ControlNet repo ID or local path "
             f"(default: {DEFAULT_DEPTH_MODEL})."
+        ),
+    )
+
+    parser.add_argument(
+        "--depth_estimator_model",
+        type=str,
+        default=DEFAULT_DEPTH_ESTIMATOR_MODEL,
+        help=(
+            "Depth-estimation repo ID or local path used "
+            "to compute depth maps on the fly "
+            f"(default: {DEFAULT_DEPTH_ESTIMATOR_MODEL})."
         ),
     )
 
@@ -328,17 +340,6 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--horizontal_fov",
-        type=float,
-        default=DEFAULT_HORIZONTAL_FOV,
-        help=(
-            "Horizontal camera field of view in degrees, used for "
-            "the planar metric-depth reconstruction "
-            f"(default: {DEFAULT_HORIZONTAL_FOV})."
-        ),
-    )
-
-    parser.add_argument(
         "--save_canny_dir",
         type=Path,
         default=None,
@@ -371,9 +372,6 @@ def parse_args():
 
     if args.width <= 0 or args.height <= 0:
         parser.error("--width and --height must be > 0.")
-
-    if args.horizontal_fov <= 0:
-        parser.error("--horizontal_fov must be > 0.")
 
     if not args.style_image.is_file():
         parser.error(
@@ -425,8 +423,6 @@ def make_canny(image):
 
 
 def load_slant_distances(csv_path, image_format):
-    """Loads, per image, the slant_distance (km) plus the yaw/pitch/roll
-    camera pose (degrees) needed by the planar metric-depth reconstruction."""
     distances = {}
 
     with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
@@ -441,11 +437,7 @@ def load_slant_distances(csv_path, image_format):
             if dist <= 0:
                 raise ValueError(f"Invalid slant distance for {name}: {dist}")
 
-            yaw = float(row["yaw"])
-            pitch = float(row["pitch"])
-            roll = float(row["roll"])
-
-            distances[name] = (dist, yaw, pitch, roll)
+            distances[name] = dist
 
     return distances
 
@@ -502,6 +494,83 @@ def load_gt_points_from_txt(img_path, w, h):
     return gt_pts
 
 
+def load_gt_mask(img_path, w, h):
+    gt_pts = load_gt_points_from_txt(
+        img_path,
+        w,
+        h,
+    )
+
+    if gt_pts is None:
+        raise ValueError(
+            f"Could not read GT runway points: {img_path}"
+        )
+
+    gt_mask = np.zeros(
+        (h, w),
+        dtype=np.uint8,
+    )
+
+    cv2.fillPoly(
+        gt_mask,
+        [
+            np.round(gt_pts).astype(
+                np.int32
+            )
+        ],
+        255,
+    )
+
+    return gt_mask > 0
+
+
+def relative_depth_to_metric(
+    depth_image,
+    gt_mask,
+    slant_distance_km,
+):
+    depth = np.asarray(
+        depth_image.convert("L"),
+        dtype=np.float32,
+    )
+
+    valid = (
+        gt_mask
+        & np.isfinite(depth)
+    )
+
+    if not np.any(valid):
+        raise ValueError(
+            "GT runway mask contains no valid "
+            "depth pixels."
+        )
+
+    runway_depth = depth[valid]
+
+    reference_depth = float(
+        np.median(runway_depth)
+    )
+
+    if reference_depth <= 0:
+        raise ValueError(
+            "Invalid runway reference depth: "
+            f"{reference_depth}"
+        )
+
+    metric_depth_km = (
+        depth
+        / reference_depth
+        * slant_distance_km
+    )
+
+    metric_depth_km = np.maximum(
+        metric_depth_km,
+        1e-6,
+    )
+
+    return metric_depth_km
+
+
 def metric_depth_to_control_image(
     metric_depth_km,
 ):
@@ -542,94 +611,67 @@ def metric_depth_to_control_image(
     ).convert("RGB")
 
 
-def _rotation_from_ypr(yaw, pitch, roll):
-    def Rz(a):
-        c, s = math.cos(a), math.sin(a)
-        return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1.0]])
+def load_depth_estimator(args):
+    device = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
+    )
 
-    def Ry(a):
-        c, s = math.cos(a), math.sin(a)
-        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+    preprocessor = (
+        DepthPreprocessor.from_pretrained(
+            args.depth_estimator_model
+        )
+    )
 
-    def Rx(a):
-        c, s = math.cos(a), math.sin(a)
-        return np.array([[1.0, 0, 0], [0, c, -s], [0, s, c]])
+    preprocessor = preprocessor.to(
+        device
+    )
 
-    return Rz(math.radians(yaw)) @ Ry(math.radians(pitch)) @ Rx(math.radians(roll))
+    return preprocessor, device
 
 
 def prepare_depth(
+    image,
+    preprocessor,
     input_path,
     slant_distance_km,
-    yaw,
-    pitch,
-    roll,
-    horizontal_fov,
     size,
 ):
-    """Planar metric depth via camera pose + ground-plane ray casting.
+    depth = preprocessor(
+        image,
+        invert=True,
+    )[0].convert("L")
 
-    Replaces the previous depth-estimator-based relative-to-metric
-    calibration: the runway ground plane is reconstructed directly from
-    the annotated corner points, the camera pose (yaw/pitch/roll), and
-    the known slant_distance to the runway center, then every pixel's
-    metric depth is obtained by ray-casting against that plane.
-    """
-    w, h = size
-
-    gt_pts = load_gt_points_from_txt(input_path, w, h)
-    if gt_pts is None:
-        raise ValueError(
-            f"Could not read GT runway points: {input_path}"
-        )
-
-    pts = gt_pts.reshape(-1, 2).astype(np.float64)
-
-    fx = fy = w / (2.0 * math.tan(math.radians(horizontal_fov) / 2.0))
-    K = np.array(
-        [
-            [fx, 0, (w - 1) / 2],
-            [0, fy, (h - 1) / 2],
-            [0, 0, 1],
-        ],
-        dtype=np.float64,
+    depth = depth.resize(
+        size,
+        Image.Resampling.BILINEAR,
     )
 
-    R = _rotation_from_ypr(yaw, pitch, roll)
-    Ki = np.linalg.inv(K)
+    gt_mask = load_gt_mask(
+        input_path,
+        size[0],
+        size[1],
+    )
 
-    # Use the annotated runway center as the known slant-distance reference.
-    ref = pts.mean(0)
-    ray = Ki @ np.array([ref[0], ref[1], 1.0])
-    ray /= np.linalg.norm(ray)
-    ref_world = R @ ray * slant_distance_km
+    metric_depth_km = (
+        relative_depth_to_metric(
+            depth,
+            gt_mask,
+            slant_distance_km,
+        )
+    )
 
-    # Runway/ground plane through that reference point.
-    normal = R @ np.array([0.0, 0.0, 1.0])
-    normal /= np.linalg.norm(normal)
-    offset = -normal.dot(ref_world)
+    control_depth = (
+        metric_depth_to_control_image(
+            metric_depth_km
+        )
+    )
 
-    y_idx, x_idx = np.indices((h, w), dtype=np.float64)
-    rays = np.stack((x_idx, y_idx, np.ones_like(x_idx)), -1) @ Ki.T
-    rays /= np.linalg.norm(rays, axis=-1, keepdims=True)
-    rw = rays @ R.T
-
-    den = np.sum(rw * normal, axis=-1)
-    valid = np.abs(den) > 1e-8
-    t = np.full((h, w), np.nan, np.float32)
-    t[valid] = (-offset / den[valid]).astype(np.float32)
-    valid &= t > 0
-
-    # Camera-axis metric depth (km). Pixels whose ray never hits the plane
-    # in front of the camera are set to +inf so they map to ~0 inverse
-    # depth (i.e. treated as arbitrarily far) in metric_depth_to_control_image.
-    metric_depth_km = np.full((h, w), np.inf, dtype=np.float32)
-    metric_depth_km[valid] = (rays[..., 2] * t)[valid]
-    metric_depth_km = np.maximum(metric_depth_km, 1e-6)
-
-    control_depth = metric_depth_to_control_image(metric_depth_km)
-
-    return control_depth, metric_depth_km
+    return (
+        control_depth,
+        metric_depth_km,
+    )
 
 
 def load_pipeline(args):
@@ -709,15 +751,13 @@ def load_pipeline(args):
 
 def process_image(
     pipe,
+    depth_preprocessor,
     style_image,
     input_path,
     output_path,
     args,
     guidance_scale,
     slant_distance_km,
-    yaw,
-    pitch,
-    roll,
 ):
     image = Image.open(
         input_path
@@ -736,12 +776,10 @@ def process_image(
     )
 
     depth, metric_depth_km = prepare_depth(
+        image,
+        depth_preprocessor,
         input_path,
         slant_distance_km,
-        yaw,
-        pitch,
-        roll,
-        args.horizontal_fov,
         (
             args.width,
             args.height,
@@ -865,6 +903,10 @@ def main():
         ).convert("RGB")
     )
 
+    depth_preprocessor, _ = (
+        load_depth_estimator(args)
+    )
+
     pipe = load_pipeline(args)
 
     guidance_scale = (
@@ -911,7 +953,7 @@ def main():
                 f"{input_path.name}"
             )
 
-        slant_distance_km, yaw, pitch, roll = (
+        slant_distance_km = (
             slant_distances[
                 input_path.name
             ]
@@ -937,15 +979,13 @@ def main():
 
         process_image(
             pipe,
+            depth_preprocessor,
             style_image,
             input_path,
             output_path,
             args,
             guidance_scale,
             slant_distance_km,
-            yaw,
-            pitch,
-            roll,
         )
 
     print(
