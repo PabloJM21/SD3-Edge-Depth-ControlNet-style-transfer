@@ -429,7 +429,7 @@ def load_slant_distances(csv_path, image_format):
         reader = csv.DictReader(f)
 
         for row in reader:
-            name = f"{row['image_name'].strip()}.{image_format}"
+            name = f"{row['image_name'].strip()}{image_format}"
             if not name:
                 continue
 
