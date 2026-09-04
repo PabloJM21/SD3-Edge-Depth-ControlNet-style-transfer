@@ -34,10 +34,6 @@ from PIL import Image
 from diffusers import StableDiffusion3ControlNetPipeline
 from diffusers.models import SD3ControlNetModel, SD3MultiControlNetModel
 from image_gen_aux import DepthPreprocessor
-from transformers import (
-    SiglipImageProcessor,
-    SiglipVisionModel,
-)
 
 
 DEFAULT_SD3_MODEL = "stabilityai/stable-diffusion-3.5-large"
@@ -318,45 +314,19 @@ class SD3CannyImageProcessor(VaeImageProcessor):
 def load_pipeline(args):
     dtype = torch.float16
 
-    canny_controlnet = SD3ControlNetModel.from_pretrained(
+    controlnet = SD3ControlNetModel.from_pretrained(
         args.canny_model,
         torch_dtype=dtype,
     )
 
-    """depth_controlnet = SD3ControlNetModel.from_pretrained(
-        args.depth_model,
-        torch_dtype=dtype,
-    )
-
-    controlnet = SD3MultiControlNetModel(
-        [canny_controlnet, depth_controlnet]
-    )"""
-
-    controlnet = canny_controlnet
-
-    """feature_extractor = SiglipImageProcessor.from_pretrained(
-        args.image_encoder_model,
-    )
-    image_encoder = SiglipVisionModel.from_pretrained(
-        args.image_encoder_model,
-        torch_dtype=dtype,
-    )"""
 
     pipe = StableDiffusion3ControlNetPipeline.from_pretrained(
         args.sd3_model,
         controlnet=controlnet,
-        #feature_extractor=feature_extractor,
-        #image_encoder=image_encoder,
         torch_dtype=dtype,
     ).to("cuda")
 
     pipe.image_processor = SD3CannyImageProcessor()
-
-    """pipe.load_ip_adapter(
-        args.ip_adapter_checkpoint,
-        weight_name=args.ip_adapter_weight_name,
-    )
-    pipe.set_ip_adapter_scale(args.ip_adapter_scale)"""
 
     # Force ordinary PyTorch attention. No FlashAttention/xFormers/
     # Transformer Engine dependency is required.
