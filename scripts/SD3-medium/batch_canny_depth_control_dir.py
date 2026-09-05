@@ -44,6 +44,7 @@ DEFAULT_STEPS = 28
 DEFAULT_CANNY_SCALE = 1.0
 DEFAULT_DEPTH_SCALE = 1.0
 DEFAULT_SEED = 1234
+DEFAULT_NEGATIVE_PROMPT = ""
 
 
 def parse_args():
@@ -55,6 +56,15 @@ def parse_args():
         "--prompt",
         required=True,
         help="Prompt controlling the transferred style/content appearance.",
+    )
+    parser.add_argument(
+        "--negative_prompt",
+        type=str,
+        default=DEFAULT_NEGATIVE_PROMPT,
+        help=(
+            "Negative prompt passed to the pipeline (e.g. quality/NSFW terms "
+            f"to steer away from). Default: {DEFAULT_NEGATIVE_PROMPT!r}."
+        ),
     )
     parser.add_argument(
         "--scale",
@@ -174,8 +184,8 @@ def normalize_format(fmt):
 
 def transfer_to_guidance(scale):
     # SD3 guidance_scale <= 1 disables classifier-free guidance.
-    # Map the user-facing [0, 1] transfer parameter to [1, 5].
-    return 1.0 + 4.0 * scale
+    # Map the user-facing [0, 1] transfer parameter to [1, 9].
+    return 1.0 + 8.0 * scale
 
 
 def make_canny(image):
@@ -271,6 +281,7 @@ def process_image(pipe, depth_processor, depth_model, depth_device, input_path, 
     with torch.inference_mode():
         result = pipe(
             prompt=args.prompt,
+            negative_prompt=args.negative_prompt,
             control_image=[canny, depth],
             controlnet_conditioning_scale=[
                 args.canny_scale,
@@ -316,6 +327,7 @@ def main():
     print(f"Found {len(input_files)} input file(s).")
     print(f"Prompt transfer scale: {args.scale}")
     print(f"SD3 guidance scale:    {guidance_scale:.3f}")
+    print(f"Negative prompt:       {args.negative_prompt!r}")
 
     for index, input_path in enumerate(input_files, start=1):
         output_path = output_dir / input_path.name
