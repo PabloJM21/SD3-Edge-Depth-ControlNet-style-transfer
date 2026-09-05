@@ -46,12 +46,12 @@ from transformers import (
 DEFAULT_SD3_MODEL = "stabilityai/stable-diffusion-3.5-large"
 DEFAULT_CANNY_MODEL = "stabilityai/stable-diffusion-3.5-large-controlnet-canny"
 DEFAULT_DEPTH_MODEL = "stabilityai/stable-diffusion-3.5-large-controlnet-depth"
-DEFAULT_DEPTH_ESTIMATOR_MODEL = "depth-anything/Depth-Anything-V2-Metric-Outdoor-Large-hf"
+DEFAULT_DEPTH_ESTIMATOR_MODEL = "depth-anything/Depth-Anything-V2-Large-hf" # "depth-anything/Depth-Anything-V2-Metric-Outdoor-Large-hf"
 DEFAULT_IMAGE_ENCODER = "google/siglip-so400m-patch14-384"
 DEFAULT_IP_ADAPTER_CHECKPOINT = "InstantX/SD3.5-Large-IP-Adapter"
 DEFAULT_IP_ADAPTER_WEIGHT_NAME = "ip-adapter.bin"
 
-DEFAULT_WIDTH = 1024
+DEFAULT_WIDTH = 1024 
 DEFAULT_HEIGHT = 1024
 DEFAULT_STEPS = 28
 DEFAULT_CANNY_SCALE = 1.0
@@ -507,10 +507,8 @@ def prepare_depth(
         )
     )
 
-    return (
-        control_depth,
-        metric_depth_km,
-    )
+    return control_depth
+        
 
 
 def load_pipeline(args):
@@ -613,7 +611,7 @@ def process_image(
         image
     )
 
-    depth, metric_depth_km = prepare_depth(
+    depth = prepare_depth(
         image,
         depth_estimator,
         (
@@ -634,13 +632,6 @@ def process_image(
             / input_path.name
         )
 
-        np.save(
-            args.save_depth_dir
-            / f"{input_path.stem}_metric_km.npy",
-            metric_depth_km.astype(
-                np.float32
-            ),
-        )
 
     canny_tensor = prepare_canny_tensor(
         canny,
