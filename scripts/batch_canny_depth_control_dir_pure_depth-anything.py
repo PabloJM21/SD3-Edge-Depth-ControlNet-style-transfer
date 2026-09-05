@@ -45,7 +45,7 @@ from transformers import (
 DEFAULT_SD3_MODEL = "stabilityai/stable-diffusion-3.5-large"
 DEFAULT_CANNY_MODEL = "stabilityai/stable-diffusion-3.5-large-controlnet-canny"
 DEFAULT_DEPTH_MODEL = "stabilityai/stable-diffusion-3.5-large-controlnet-depth"
-DEFAULT_DEPTH_ESTIMATOR_MODEL = "depth-anything/Depth-Anything-V2-Metric-Outdoor-Large-hf"
+DEFAULT_DEPTH_ESTIMATOR_MODEL = "depth-anything/Depth-Anything-V2-Large-hf" #"depth-anything/Depth-Anything-V2-Metric-Outdoor-Large-hf"
 DEFAULT_IMAGE_ENCODER = "google/siglip-so400m-patch14-384"
 DEFAULT_IP_ADAPTER_CHECKPOINT = "InstantX/SD3.5-Large-IP-Adapter"
 DEFAULT_IP_ADAPTER_WEIGHT_NAME = "ip-adapter.bin"
