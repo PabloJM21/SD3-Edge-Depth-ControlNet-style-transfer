@@ -424,7 +424,8 @@ def load_depth_estimator(args):
     return preprocessor, device
 
 
-def prepare_depth(image, preprocessor, size):
+def prepare_depth(image, depth_estimator, size):
+    preprocessor, _ = depth_estimator
     depth = preprocessor(image, invert=True)[0].convert("RGB")
     return depth.resize(size, Image.Resampling.BILINEAR)
 
