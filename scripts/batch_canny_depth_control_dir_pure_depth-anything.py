@@ -11,6 +11,9 @@ Example:
         --output_dir /data/output \
         --style_image /data/style.jpg
 
+If --style_image is omitted, each input image is used as its own
+IP-Adapter style reference (self-style transfer).
+
 All models are loaded directly from the Hugging Face Hub:
     stabilityai/stable-diffusion-3.5-large
     stabilityai/stable-diffusion-3.5-large-controlnet-canny
@@ -191,9 +194,13 @@ def parse_args():
 
     parser.add_argument(
         "--style_image",
-        required=True,
         type=Path,
-        help="Reference style image used by IP-Adapter.",
+        default=None,
+        help=(
+            "Reference style image used by IP-Adapter. "
+            "If omitted, each input image is used as its own "
+            "style image (self-style transfer)."
+        ),
     )
 
     parser.add_argument(
@@ -361,7 +368,7 @@ def parse_args():
     if args.width <= 0 or args.height <= 0:
         parser.error("--width and --height must be > 0.")
 
-    if not args.style_image.is_file():
+    if args.style_image is not None and not args.style_image.is_file():
         parser.error(
             f"Style image does not exist: {args.style_image}"
         )
@@ -565,6 +572,14 @@ def process_image(
         )
     )
 
+    # If no explicit global style image was provided, fall back to using
+    # this content image itself as the IP-Adapter style reference.
+    ip_adapter_image = (
+        style_image
+        if style_image is not None
+        else image
+    )
+
     with torch.inference_mode():
         result = pipe(
             prompt=args.prompt,
@@ -573,7 +588,7 @@ def process_image(
                 args.canny_scale,
                 args.depth_scale,
             ],
-            ip_adapter_image=style_image,
+            ip_adapter_image=ip_adapter_image,
             height=args.height,
             width=args.width,
             num_inference_steps=args.steps,
@@ -637,10 +652,13 @@ def main():
             f"{content_dir}"
         )
 
+    # If --style_image was given, load it once up front and reuse it for
+    # every image. Otherwise leave it as None so process_image() falls
+    # back to using each content image as its own style reference.
     style_image = (
-        Image.open(
-            args.style_image
-        ).convert("RGB")
+        Image.open(args.style_image).convert("RGB")
+        if args.style_image is not None
+        else None
     )
 
     depth_estimator = (
@@ -673,6 +691,12 @@ def main():
         f"IP-Adapter scale:      "
         f"{args.ip_adapter_scale}"
     )
+
+    if style_image is None:
+        print(
+            "No --style_image provided: "
+            "using each input image as its own style reference."
+        )
 
     for index, input_path in enumerate(
         input_files,
