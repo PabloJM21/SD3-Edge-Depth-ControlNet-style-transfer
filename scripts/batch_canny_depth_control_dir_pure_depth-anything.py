@@ -35,9 +35,8 @@ from PIL import Image
 from diffusers import StableDiffusion3ControlNetPipeline
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.models import SD3ControlNetModel, SD3MultiControlNetModel
+from image_gen_aux import DepthPreprocessor
 from transformers import (
-    AutoImageProcessor,
-    AutoModelForDepthEstimation,
     SiglipImageProcessor,
     SiglipVisionModel,
 )
@@ -46,12 +45,12 @@ from transformers import (
 DEFAULT_SD3_MODEL = "stabilityai/stable-diffusion-3.5-large"
 DEFAULT_CANNY_MODEL = "stabilityai/stable-diffusion-3.5-large-controlnet-canny"
 DEFAULT_DEPTH_MODEL = "stabilityai/stable-diffusion-3.5-large-controlnet-depth"
-DEFAULT_DEPTH_ESTIMATOR_MODEL = "depth-anything/Depth-Anything-V2-Large-hf" # "depth-anything/Depth-Anything-V2-Metric-Outdoor-Large-hf"
+DEFAULT_DEPTH_ESTIMATOR_MODEL = "depth-anything/Depth-Anything-V2-Metric-Outdoor-Large-hf"
 DEFAULT_IMAGE_ENCODER = "google/siglip-so400m-patch14-384"
 DEFAULT_IP_ADAPTER_CHECKPOINT = "InstantX/SD3.5-Large-IP-Adapter"
 DEFAULT_IP_ADAPTER_WEIGHT_NAME = "ip-adapter.bin"
 
-DEFAULT_WIDTH = 1024 
+DEFAULT_WIDTH = 1024
 DEFAULT_HEIGHT = 1024
 DEFAULT_STEPS = 28
 DEFAULT_CANNY_SCALE = 1.0
@@ -405,46 +404,6 @@ def make_canny(image):
     return Image.fromarray(edges)
 
 
-def metric_depth_to_control_image(
-    metric_depth_km,
-):
-    inverse_depth = 1.0 / np.maximum(
-        metric_depth_km,
-        1e-6,
-    )
-
-    low = np.percentile(
-        inverse_depth,
-        1.0,
-    )
-
-    high = np.percentile(
-        inverse_depth,
-        99.0,
-    )
-
-    inverse_depth = np.clip(
-        inverse_depth,
-        low,
-        high,
-    )
-
-    inverse_depth = (
-        inverse_depth - low
-    ) / max(
-        high - low,
-        1e-6,
-    )
-
-    depth_uint8 = np.round(
-        inverse_depth * 255.0
-    ).astype(np.uint8)
-
-    return Image.fromarray(
-        depth_uint8
-    ).convert("RGB")
-
-
 def load_depth_estimator(args):
     device = torch.device(
         "cuda"
@@ -452,63 +411,22 @@ def load_depth_estimator(args):
         else "cpu"
     )
 
-    image_processor = (
-        AutoImageProcessor.from_pretrained(
+    preprocessor = (
+        DepthPreprocessor.from_pretrained(
             args.depth_estimator_model
         )
     )
 
-    model = (
-        AutoModelForDepthEstimation.from_pretrained(
-            args.depth_estimator_model
-        )
+    preprocessor = preprocessor.to(
+        device
     )
 
-    model = model.to(device)
-    model.eval()
-
-    return image_processor, model, device
+    return preprocessor, device
 
 
-def prepare_depth(
-    image,
-    depth_estimator,
-    size,
-):
-    image_processor, model, device = depth_estimator
-
-    inputs = image_processor(
-        images=image,
-        return_tensors="pt",
-    ).to(device)
-
-    with torch.no_grad():
-        outputs = model(**inputs)
-
-    # This is a metric depth model: predicted_depth is already in meters,
-    # no relative-to-metric calibration against ground truth is needed.
-    predicted_depth = outputs.predicted_depth
-
-    depth_m = torch.nn.functional.interpolate(
-        predicted_depth.unsqueeze(1),
-        size=(size[1], size[0]),
-        mode="bicubic",
-        align_corners=False,
-    ).squeeze().cpu().numpy()
-
-    metric_depth_km = np.maximum(
-        depth_m / 1000.0,
-        1e-6,
-    )
-
-    control_depth = (
-        metric_depth_to_control_image(
-            metric_depth_km
-        )
-    )
-
-    return control_depth
-        
+def prepare_depth(image, preprocessor, size):
+    depth = preprocessor(image, invert=True)[0].convert("RGB")
+    return depth.resize(size, Image.Resampling.BILINEAR)
 
 
 def load_pipeline(args):
@@ -631,7 +549,6 @@ def process_image(
             args.save_depth_dir
             / input_path.name
         )
-
 
     canny_tensor = prepare_canny_tensor(
         canny,
