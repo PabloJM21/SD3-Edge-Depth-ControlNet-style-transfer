@@ -21,6 +21,10 @@ All models are loaded directly from the Hugging Face Hub:
     depth-anything/Depth-Anything-V2-Metric-Outdoor-Large-hf
     google/siglip-so400m-patch14-384
     InstantX/SD3.5-Large-IP-Adapter
+
+Note: each input image is generated at its own native resolution
+(rounded to the nearest multiple of 16, which SD3.5's VAE + patchified
+transformer requires) rather than being forced to a fixed size.
 """
 
 import argparse
@@ -53,12 +57,14 @@ DEFAULT_IMAGE_ENCODER = "google/siglip-so400m-patch14-384"
 DEFAULT_IP_ADAPTER_CHECKPOINT = "InstantX/SD3.5-Large-IP-Adapter"
 DEFAULT_IP_ADAPTER_WEIGHT_NAME = "ip-adapter.bin"
 
-DEFAULT_WIDTH = 1024
-DEFAULT_HEIGHT = 1024
 DEFAULT_STEPS = 28
 DEFAULT_CANNY_SCALE = 1.0
 DEFAULT_DEPTH_SCALE = 1.0
 DEFAULT_SEED = 1234
+
+# SD3.5's VAE downsamples by 8x and its transformer uses a patch size of 2,
+# so both generation dimensions must be divisible by 16.
+SD3_DIM_MULTIPLE = 16
 
 
 class SD3CannyImageProcessor(VaeImageProcessor):
@@ -321,20 +327,6 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--width",
-        type=int,
-        default=DEFAULT_WIDTH,
-        help=f"Generation width (default: {DEFAULT_WIDTH}).",
-    )
-
-    parser.add_argument(
-        "--height",
-        type=int,
-        default=DEFAULT_HEIGHT,
-        help=f"Generation height (default: {DEFAULT_HEIGHT}).",
-    )
-
-    parser.add_argument(
         "--save_canny_dir",
         type=Path,
         default=None,
@@ -365,9 +357,6 @@ def parse_args():
     if args.steps <= 0:
         parser.error("--steps must be > 0.")
 
-    if args.width <= 0 or args.height <= 0:
-        parser.error("--width and --height must be > 0.")
-
     if args.style_image is not None and not args.style_image.is_file():
         parser.error(
             f"Style image does not exist: {args.style_image}"
@@ -387,6 +376,18 @@ def transfer_to_guidance(scale):
     # SD3 guidance_scale <= 1 disables classifier-free guidance.
     # Map the user-facing [0, 1] transfer parameter to [1, 5].
     return 1.0 + 4.0 * scale
+
+
+def round_to_multiple(value, multiple=SD3_DIM_MULTIPLE):
+    """Round to the nearest multiple, never rounding down to 0."""
+    rounded = int(round(value / multiple)) * multiple
+    return max(rounded, multiple)
+
+
+def native_generation_size(image):
+    """Return (width, height) for `image`, rounded to a multiple of 16."""
+    width, height = image.size
+    return round_to_multiple(width), round_to_multiple(height)
 
 
 def make_canny(image):
@@ -525,13 +526,15 @@ def process_image(
         input_path
     ).convert("RGB")
 
-    image = image.resize(
-        (
-            args.width,
-            args.height,
-        ),
-        Image.Resampling.LANCZOS,
-    )
+    # Keep this image's own aspect ratio/resolution instead of forcing a
+    # fixed size; just round up/down to the nearest multiple of 16 since
+    # SD3.5 requires that.
+    gen_width, gen_height = native_generation_size(image)
+    if (gen_width, gen_height) != image.size:
+        image = image.resize(
+            (gen_width, gen_height),
+            Image.Resampling.LANCZOS,
+        )
 
     canny = make_canny(
         image
@@ -540,10 +543,7 @@ def process_image(
     depth = prepare_depth(
         image,
         depth_estimator,
-        (
-            args.width,
-            args.height,
-        ),
+        (gen_width, gen_height),
     )
 
     if args.save_canny_dir is not None:
@@ -560,8 +560,8 @@ def process_image(
 
     canny_tensor = prepare_canny_tensor(
         canny,
-        args.width,
-        args.height,
+        gen_width,
+        gen_height,
     ).to(dtype=torch.float16)
 
     generator = (
@@ -589,8 +589,8 @@ def process_image(
                 args.depth_scale,
             ],
             ip_adapter_image=ip_adapter_image,
-            height=args.height,
-            width=args.width,
+            height=gen_height,
+            width=gen_width,
             num_inference_steps=args.steps,
             guidance_scale=guidance_scale,
             generator=generator,
@@ -690,6 +690,11 @@ def main():
     print(
         f"IP-Adapter scale:      "
         f"{args.ip_adapter_scale}"
+    )
+
+    print(
+        "Generation size:       "
+        "native per-image (rounded to multiple of 16)"
     )
 
     if style_image is None:
