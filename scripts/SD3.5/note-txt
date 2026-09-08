@@ -1,0 +1,22 @@
+First geometric pipeline:
+
+- Uses a learned depth estimator (Depth‑Anything).
+
+- Produces relative depth (arbitrary scale).
+
+- Converts it to metric depth by dividing by the runway’s median depth and multiplying by slant distance.
+
+- Depends on the depth estimator’s output quality.
+
+
+
+
+Second geometric pipeline:
+
+- Uses no depth estimator.
+
+- Computes true metric depth by ray‑casting camera rays against a reconstructed ground plane.
+
+- Uses camera intrinsics, yaw/pitch/roll, runway geometry, and slant distance.
+
+- Is fully geometric, independent of image appearance.
