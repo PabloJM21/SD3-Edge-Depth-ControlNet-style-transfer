@@ -76,7 +76,7 @@ DEFAULT_INPAINT_MODEL = "alimama-creative/SD3-Controlnet-Inpainting"
 DEFAULT_STEPS = 28
 DEFAULT_CANNY_SCALE = 1.0
 DEFAULT_DEPTH_SCALE = 1.0
-DEFAULT_INPAINT_SCALE = 1.0
+DEFAULT_INPAINT_SCALE = 0.95
 DEFAULT_SEED = 1234
 DEFAULT_NEGATIVE_PROMPT = "hallucinated details, artificial edges, extra geometry, random artifacts"
 
@@ -367,6 +367,48 @@ def gt_mask_to_pil(gt_mask_bool):
 # Pipeline construction
 # ---------------------------------------------------------------------------
 
+def match_controlnet_input_channels(controlnet, target_in_channels):
+    """Expand `controlnet`'s conditioning patch-embed conv
+    (`pos_embed_input.proj`) to accept `target_in_channels` input
+    channels if it currently accepts fewer, zero-padding the new
+    channel(s) so they contribute nothing to the conv's output.
+
+    This is needed because StableDiffusion3ControlNetInpaintingPipeline
+    builds one mask-concatenated conditioning tensor (base latent
+    channels + mask channel(s)) and feeds that same tensor to every
+    controlnet in an SD3MultiControlNetModel list, not just the
+    mask-aware one. Plain pretrained controlnets (canny, depth) have a
+    `pos_embed_input.proj` sized for the base latent channel count only,
+    so without this they raise a channel-count mismatch. Zero-padding
+    the extra channel(s) preserves each plain controlnet's original,
+    already-trained behavior on its native channels; the mask channel
+    simply multiplies against zero weights and adds nothing.
+    """
+    old_conv = controlnet.pos_embed_input.proj
+
+    if old_conv.in_channels >= target_in_channels:
+        return controlnet
+
+    new_conv = torch.nn.Conv2d(
+        target_in_channels,
+        old_conv.out_channels,
+        kernel_size=old_conv.kernel_size,
+        stride=old_conv.stride,
+        padding=old_conv.padding,
+        bias=old_conv.bias is not None,
+        dtype=old_conv.weight.dtype,
+        device=old_conv.weight.device,
+    )
+    with torch.no_grad():
+        new_conv.weight.zero_()
+        new_conv.weight[:, : old_conv.in_channels] = old_conv.weight
+        if old_conv.bias is not None:
+            new_conv.bias.copy_(old_conv.bias)
+
+    controlnet.pos_embed_input.proj = new_conv
+    return controlnet
+
+
 def load_pipeline(args):
     dtype = torch.float16
 
@@ -386,6 +428,15 @@ def load_pipeline(args):
             args.depth_model,
             torch_dtype=dtype,
         )
+
+        # StableDiffusion3ControlNetInpaintingPipeline concatenates the
+        # mask onto the conditioning latents once and feeds that same
+        # tensor to every controlnet in the list. canny/depth were
+        # pretrained without that extra channel, so pad their input convs
+        # to match (zero-initialized: no change to their behavior).
+        target_in_channels = inpaint_controlnet.pos_embed_input.proj.in_channels
+        match_controlnet_input_channels(canny_controlnet, target_in_channels)
+        match_controlnet_input_channels(depth_controlnet, target_in_channels)
 
         # The inpainting controlnet must come first: only it has the extra
         # mask-conditioning channel, and StableDiffusion3ControlNetInpaintingPipeline
