@@ -332,6 +332,7 @@ def install_debug_hooks(pipe, debug_state):
 
     controlnet = pipe.controlnet
 
+
     def wrap_branch_forward(net, branch_index):
         orig_forward = net.forward
 
@@ -339,26 +340,53 @@ def install_debug_hooks(pipe, debug_state):
             scale = kw.get("conditioning_scale", None)
             if scale is None and len(a) > 2:
                 scale = a[2]
+
             out = orig_forward(*a, **kw)
-            tensors = list(flatten_tensors(out))
-            if tensors:
-                norms = [t.float().norm().item() for t in tensors]
-                print(
-                    f"[debug] controlnet branch {branch_index}: "
-                    f"conditioning_scale={scale}, "
-                    f"{len(tensors)} block-sample tensor(s), "
-                    f"norm(s)={['%.4f' % n for n in norms]}"
-                )
-            else:
-                print(
-                    f"[debug] controlnet branch {branch_index}: "
-                    f"conditioning_scale={scale}, "
-                    f"found NO tensors in return value -- return type is "
-                    f"{type(out)!r}, repr(out)[:200]={repr(out)[:200]!r}"
-                )
+
+            print(
+                f"\n[DEBUG-CN] branch {branch_index}: "
+                f"scale={scale}, return_type={type(out).__name__}"
+            )
+
+            if hasattr(out, "keys"):
+                print(f"[DEBUG-CN] branch {branch_index}: keys={list(out.keys())}")
+
+            if hasattr(out, "to_tuple"):
+                tup = out.to_tuple()
+                print(f"[DEBUG-CN] branch {branch_index}: tuple_len={len(tup)}")
+
+                for i, x in enumerate(tup):
+                    if torch.is_tensor(x):
+                        print(
+                            f"[DEBUG-CN] branch {branch_index}: "
+                            f"tuple[{i}] shape={tuple(x.shape)} "
+                            f"mean={x.float().mean().item():.6f} "
+                            f"std={x.float().std().item():.6f} "
+                            f"norm={x.float().norm().item():.4f} "
+                            f"finite={torch.isfinite(x).all().item()}"
+                        )
+                    elif isinstance(x, (list, tuple)):
+                        print(
+                            f"[DEBUG-CN] branch {branch_index}: "
+                            f"tuple[{i}] type={type(x).__name__} "
+                            f"len={len(x)}"
+                        )
+                        for j, y in enumerate(x):
+                            if torch.is_tensor(y):
+                                print(
+                                    f"[DEBUG-CN] branch {branch_index}: "
+                                    f"tuple[{i}][{j}] shape={tuple(y.shape)} "
+                                    f"mean={y.float().mean().item():.6f} "
+                                    f"std={y.float().std().item():.6f} "
+                                    f"norm={y.float().norm().item():.4f} "
+                                    f"finite={torch.isfinite(y).all().item()}"
+                                )
+
             return out
 
         net.forward = debug_branch_forward
+
+        
 
     if isinstance(controlnet, SD3MultiControlNetModel):
         for i, net in enumerate(controlnet.nets):
@@ -368,21 +396,44 @@ def install_debug_hooks(pipe, debug_state):
 
         def debug_multi_forward(*a, **kw):
             result = orig_multi_forward(*a, **kw)
-            tensors = list(flatten_tensors(result))
-            if tensors:
-                norms = [t.float().norm().item() for t in tensors]
-                print(
-                    f"[debug] SD3MultiControlNetModel combined output: "
-                    f"{len(tensors)} tensor(s) (sum of all branches above, "
-                    f"this is what reaches the transformer), "
-                    f"norm(s)={['%.4f' % n for n in norms]}"
-                )
-            else:
-                print(
-                    f"[debug] SD3MultiControlNetModel combined output: "
-                    f"found NO tensors -- return type is {type(result)!r}, "
-                    f"repr(result)[:200]={repr(result)[:200]!r}"
-                )
+
+            print(
+                f"\n[DEBUG-MULTI] return_type={type(result).__name__}"
+            )
+
+            if hasattr(result, "keys"):
+                print(f"[DEBUG-MULTI] keys={list(result.keys())}")
+
+            if hasattr(result, "to_tuple"):
+                tup = result.to_tuple()
+                print(f"[DEBUG-MULTI] tuple_len={len(tup)}")
+
+                for i, x in enumerate(tup):
+                    if torch.is_tensor(x):
+                        print(
+                            f"[DEBUG-MULTI] tuple[{i}] shape={tuple(x.shape)} "
+                            f"mean={x.float().mean().item():.6f} "
+                            f"std={x.float().std().item():.6f} "
+                            f"norm={x.float().norm().item():.4f} "
+                            f"finite={torch.isfinite(x).all().item()}"
+                        )
+                    elif isinstance(x, (list, tuple)):
+                        print(
+                            f"[DEBUG-MULTI] tuple[{i}] "
+                            f"type={type(x).__name__} len={len(x)}"
+                        )
+
+                        for j, y in enumerate(x):
+                            if torch.is_tensor(y):
+                                print(
+                                    f"[DEBUG-MULTI] tuple[{i}][{j}] "
+                                    f"shape={tuple(y.shape)} "
+                                    f"mean={y.float().mean().item():.6f} "
+                                    f"std={y.float().std().item():.6f} "
+                                    f"norm={y.float().norm().item():.4f} "
+                                    f"finite={torch.isfinite(y).all().item()}"
+                                )
+
             return result
 
         controlnet.forward = debug_multi_forward
@@ -398,33 +449,43 @@ def install_debug_hooks(pipe, debug_state):
             call_idx = debug_state["transformer_calls"]
             debug_state["transformer_calls"] += 1
 
-            if call_idx < max_calls_to_log:
-                print(f"[debug] transformer.forward() call #{call_idx}, all kwargs received:")
-                controlnet_like_keys = []
+            if call_idx < 2:
+                print(
+                    f"\n[DEBUG-TRANSFORMER] call #{call_idx}"
+                )
+
+                print(
+                    f"[DEBUG-TRANSFORMER] positional args={len(a)}, "
+                    f"kwargs={list(kw.keys())}"
+                )
+
                 for k, v in kw.items():
-                    tensors = list(flatten_tensors(v))
-                    if tensors:
-                        norms = [t.float().norm().item() for t in tensors]
+                    if torch.is_tensor(v):
                         print(
-                            f"    {k}: type={type(v).__name__}, "
-                            f"{len(tensors)} tensor(s), "
-                            f"norm(s)={['%.4f' % n for n in norms]}"
+                            f"[DEBUG-TRANSFORMER] {k}: "
+                            f"shape={tuple(v.shape)} "
+                            f"mean={v.float().mean().item():.6f} "
+                            f"std={v.float().std().item():.6f} "
+                            f"norm={v.float().norm().item():.4f} "
+                            f"finite={torch.isfinite(v).all().item()}"
                         )
-                        if any(n > 1e-6 for n in norms):
-                            controlnet_like_keys.append(k)
-                    else:
-                        print(f"    {k}: type={type(v).__name__} (no tensors found), value={v!r}"[:150])
-                print(
-                    f"    -> kwarg(s) actually carrying non-zero tensor "
-                    f"content (candidates for the controlnet residual): "
-                    f"{controlnet_like_keys}"
-                )
-            elif call_idx == max_calls_to_log:
-                print(
-                    f"[debug] transformer.forward(): suppressing further "
-                    f"per-call logs after {max_calls_to_log} calls "
-                    f"(pattern repeats identically for every remaining step)"
-                )
+                    elif isinstance(v, (list, tuple)):
+                        print(
+                            f"[DEBUG-TRANSFORMER] {k}: "
+                            f"{type(v).__name__}, len={len(v)}"
+                        )
+
+                        for i, x in enumerate(v):
+                            if torch.is_tensor(x):
+                                print(
+                                    f"[DEBUG-TRANSFORMER] "
+                                    f"{k}[{i}]: "
+                                    f"shape={tuple(x.shape)} "
+                                    f"mean={x.float().mean().item():.6f} "
+                                    f"std={x.float().std().item():.6f} "
+                                    f"norm={x.float().norm().item():.4f} "
+                                    f"finite={torch.isfinite(x).all().item()}"
+                                )
 
             return orig_transformer_forward(*a, **kw)
 
