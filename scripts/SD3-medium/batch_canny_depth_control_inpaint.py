@@ -57,7 +57,7 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
+from PIL import Image, ImageOps
 from diffusers import StableDiffusion3ControlNetPipeline
 from diffusers.models import SD3ControlNetModel, SD3MultiControlNetModel
 from diffusers.pipelines import StableDiffusion3ControlNetInpaintingPipeline
@@ -465,6 +465,7 @@ def process_image_inpaint(pipe, depth_processor, depth_model, depth_device, inpu
         raise
 
     mask_image = gt_mask_to_pil(gt_mask_bool)
+    mask_image = ImageOps.invert(mask_image)  # runway polygon -> 0 (preserve), everything else -> 255 (regenerate)
     canny = make_canny(image)
     depth = prepare_depth(
         image,
