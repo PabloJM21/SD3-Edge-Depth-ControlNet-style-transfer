@@ -535,9 +535,12 @@ def load_pipeline(args):
             args.sd3_model, torch_dtype=dtype
         ).to("cuda")
 
+    # Inpaint + ControlNet branch
     if args.use_inpaint_pipeline:
         nets = []
+        inpaint_controlnet = None
 
+        # Optional inpaint ControlNet (image + mask conditioning)
         if args.inpaint_scale > 0:
             inpaint_controlnet = SD3ControlNetModel.from_pretrained(
                 args.inpaint_model,
@@ -546,6 +549,7 @@ def load_pipeline(args):
             )
             nets.append(inpaint_controlnet)
 
+        # Canny ControlNet
         if args.canny_scale > 0:
             nets.append(
                 SD3ControlNetModel.from_pretrained(
@@ -553,6 +557,7 @@ def load_pipeline(args):
                 )
             )
 
+        # Depth ControlNet
         if args.depth_scale > 0:
             nets.append(
                 SD3ControlNetModel.from_pretrained(
@@ -560,9 +565,20 @@ def load_pipeline(args):
                 )
             )
 
-        if args.inpaint_scale > 0 and len(nets) > 1:
+        # --- Channel matching logic ---
+        # Case 1: inpaint_controlnet present -> use its in_channels as target
+        if inpaint_controlnet is not None and len(nets) > 1:
             target_in_channels = inpaint_controlnet.pos_embed_input.proj.in_channels
             for net in nets[1:]:
+                match_controlnet_input_channels(net, target_in_channels)
+
+        # Case 2: no inpaint_controlnet, but we still use control_mask
+        # StableDiffusion3ControlNetInpaintingPipeline will build a 17-channel
+        # control tensor (RGB + mask), so we must expand all nets to 17 channels.
+        elif inpaint_controlnet is None and len(nets) > 0:
+            # Original canny/depth nets expect 16 channels; we need 17.
+            target_in_channels = nets[0].pos_embed_input.proj.in_channels + 1
+            for net in nets:
                 match_controlnet_input_channels(net, target_in_channels)
 
         controlnet = nets[0] if len(nets) == 1 else SD3MultiControlNetModel(nets)
@@ -576,6 +592,7 @@ def load_pipeline(args):
         pipe.controlnet.to(dtype)
         return pipe.to("cuda")
 
+    # Plain ControlNet (no inpaint pipeline)
     nets = []
     if args.canny_scale > 0:
         nets.append(
@@ -598,6 +615,7 @@ def load_pipeline(args):
         torch_dtype=dtype,
     )
     return pipe.to("cuda")
+
 
 
 def process_image_control(pipe, depth_processor, depth_model, depth_device, input_path, output_path, args, guidance_scale):
