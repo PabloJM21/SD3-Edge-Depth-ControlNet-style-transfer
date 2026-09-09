@@ -427,6 +427,39 @@ def match_controlnet_input_channels(controlnet, target_in_channels):
     return controlnet
 
 
+def flatten_tensors(obj):
+    """Recursively yield every torch.Tensor leaf inside `obj`.
+
+    `obj` may be a Tensor, None, a (possibly nested) list/tuple (e.g. a
+    tuple wrapping a per-transformer-block list of tensors, which is the
+    common controlnet return shape), a dict-like object (anything with
+    `.items()`), a diffusers BaseOutput-style object (anything with
+    `.to_tuple()`), or a plain dataclass/object (fallback: `vars(obj)`).
+    A flat `isinstance(x, (list, tuple))` + `torch.is_tensor` filter
+    silently returns nothing for any of the nested cases, which is why
+    the norm lists were coming back empty.
+    """
+    if obj is None:
+        return
+    if torch.is_tensor(obj):
+        yield obj
+        return
+    if isinstance(obj, (list, tuple)):
+        for item in obj:
+            yield from flatten_tensors(item)
+        return
+    if hasattr(obj, "items"):
+        for _, v in obj.items():
+            yield from flatten_tensors(v)
+        return
+    if hasattr(obj, "to_tuple"):
+        yield from flatten_tensors(obj.to_tuple())
+        return
+    if hasattr(obj, "__dict__"):
+        for v in vars(obj).values():
+            yield from flatten_tensors(v)
+
+
 def install_debug_hooks(pipe, debug_state):
     """Monkey-patch several of `pipe`'s bound methods to print/log what
     they actually receive and return at runtime, and stash results into
@@ -529,15 +562,22 @@ def install_debug_hooks(pipe, debug_state):
             if scale is None and len(a) > 2:
                 scale = a[2]
             out = orig_forward(*a, **kw)
-            samples = out if isinstance(out, (list, tuple)) else [out]
-            norms = [
-                s.float().norm().item() for s in samples if torch.is_tensor(s)
-            ]
-            print(
-                f"[debug] controlnet branch {branch_index}: "
-                f"conditioning_scale={scale}, "
-                f"output block-sample norm(s)={['%.4f' % n for n in norms]}"
-            )
+            tensors = list(flatten_tensors(out))
+            if tensors:
+                norms = [t.float().norm().item() for t in tensors]
+                print(
+                    f"[debug] controlnet branch {branch_index}: "
+                    f"conditioning_scale={scale}, "
+                    f"{len(tensors)} block-sample tensor(s), "
+                    f"norm(s)={['%.4f' % n for n in norms]}"
+                )
+            else:
+                print(
+                    f"[debug] controlnet branch {branch_index}: "
+                    f"conditioning_scale={scale}, "
+                    f"found NO tensors in return value -- return type is "
+                    f"{type(out)!r}, repr(out)[:200]={repr(out)[:200]!r}"
+                )
             return out
 
         net.forward = debug_branch_forward
@@ -550,15 +590,21 @@ def install_debug_hooks(pipe, debug_state):
 
         def debug_multi_forward(*a, **kw):
             result = orig_multi_forward(*a, **kw)
-            samples = result if isinstance(result, (list, tuple)) else [result]
-            norms = [
-                s.float().norm().item() for s in samples if torch.is_tensor(s)
-            ]
-            print(
-                f"[debug] SD3MultiControlNetModel combined output norm(s) "
-                f"(sum of all branches above, this is what reaches the "
-                f"transformer): {['%.4f' % n for n in norms]}"
-            )
+            tensors = list(flatten_tensors(result))
+            if tensors:
+                norms = [t.float().norm().item() for t in tensors]
+                print(
+                    f"[debug] SD3MultiControlNetModel combined output: "
+                    f"{len(tensors)} tensor(s) (sum of all branches above, "
+                    f"this is what reaches the transformer), "
+                    f"norm(s)={['%.4f' % n for n in norms]}"
+                )
+            else:
+                print(
+                    f"[debug] SD3MultiControlNetModel combined output: "
+                    f"found NO tensors -- return type is {type(result)!r}, "
+                    f"repr(result)[:200]={repr(result)[:200]!r}"
+                )
             return result
 
         controlnet.forward = debug_multi_forward
@@ -576,23 +622,25 @@ def install_debug_hooks(pipe, debug_state):
             debug_state["transformer_calls"] += 1
 
             if call_idx < max_calls_to_log:
-                tensor_kwargs = {
-                    k: v for k, v in kw.items() if torch.is_tensor(v)
-                }
-                print(f"[debug] transformer.forward() call #{call_idx}, tensor kwargs received:")
-                for k, v in tensor_kwargs.items():
-                    print(
-                        f"    {k}: shape={tuple(v.shape)}, "
-                        f"mean={v.float().mean().item():.5f}, "
-                        f"norm={v.float().norm().item():.5f}"
-                    )
-                likely_controlnet_keys = [
-                    k for k in tensor_kwargs
-                    if "controlnet" in k.lower() or "block" in k.lower()
-                ]
+                print(f"[debug] transformer.forward() call #{call_idx}, all kwargs received:")
+                controlnet_like_keys = []
+                for k, v in kw.items():
+                    tensors = list(flatten_tensors(v))
+                    if tensors:
+                        norms = [t.float().norm().item() for t in tensors]
+                        print(
+                            f"    {k}: type={type(v).__name__}, "
+                            f"{len(tensors)} tensor(s), "
+                            f"norm(s)={['%.4f' % n for n in norms]}"
+                        )
+                        if any(n > 1e-6 for n in norms):
+                            controlnet_like_keys.append(k)
+                    else:
+                        print(f"    {k}: type={type(v).__name__} (no tensors found), value={v!r}"[:150])
                 print(
-                    f"    -> kwarg(s) that look like the controlnet "
-                    f"residual injected into the transformer: {likely_controlnet_keys}"
+                    f"    -> kwarg(s) actually carrying non-zero tensor "
+                    f"content (candidates for the controlnet residual): "
+                    f"{controlnet_like_keys}"
                 )
             elif call_idx == max_calls_to_log:
                 print(
