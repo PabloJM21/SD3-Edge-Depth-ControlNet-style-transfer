@@ -420,24 +420,33 @@ def load_pipeline(args):
 def load_inpaint_pipeline(args):
     dtype = torch.float16
 
-    vae = AutoencoderKL.from_pretrained(
-        args.inpaint_vae_model,
-        torch_dtype=dtype,
-    )
-
+    # Load base SDXL inpaint model
     pipe = StableDiffusionXLInpaintPipeline.from_pretrained(
-        args.inpaint_model,
+        "stabilityai/stable-diffusion-xl-base-1.0",
         torch_dtype=dtype,
-        vae=vae,
-    )
+        vae=AutoencoderKL.from_pretrained(
+            args.inpaint_vae_model,
+            torch_dtype=dtype,
+        ),
+    ).to("cuda")
 
-    pipe = pipe.to("cuda")
+    # If the provided model is a LoRA repo, load it
+    try:
+        pipe.load_lora_weights(
+            args.inpaint_model,
+            weight_name="pytorch_lora_weights.safetensors"
+        )
+        print(f"Loaded LoRA weights from {args.inpaint_model}")
+    except Exception as e:
+        print(f"Warning: Could not load LoRA weights from {args.inpaint_model}: {e}")
 
+    # Disable FlashAttention etc.
     torch.backends.cuda.enable_flash_sdp(False)
     torch.backends.cuda.enable_mem_efficient_sdp(False)
     torch.backends.cuda.enable_math_sdp(True)
 
     return pipe
+
 
 
 def reintegrate_runway(inpaint_pipe, generated_image, mask_image, args, seed):
