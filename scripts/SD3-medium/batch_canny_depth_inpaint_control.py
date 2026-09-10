@@ -2,6 +2,26 @@
 """
 Batch SD3 Medium + Canny + Depth ControlNet style transfer, with an
 optional ground-truth-mask-driven inpainting mode.
+
+
+
+if use_inpaint_pipeline:
+    if inpaint-scale:
+        if not (canny-scale or depth-scale):
+            single-conditioning with inpainting. Apply StableDiffusion3ControlNetInpaintingPipeline()
+        else:
+            multi-conditioning with inpainting, plus canny/depth controlnet or both. Call match_controlnet_input_channels() to match shapes. Apply StableDiffusion3ControlNetInpaintingPipeline()
+    else:
+        if not (canny-scale or depth-scale):
+            no controlnets used. Just apply reverse mask in inpainting pipeline. Apply StableDiffusionInpaintPipeline()
+        else:
+            single-conditioning with canny/depth or multi-conditioning with both. Apply StableDiffusion3ControlNetInpaintingPipeline()
+else:
+    if not (canny-scale or depth-scale):
+        no controlnets used. Apply StableDiffusion3Pipeline()
+    else:
+        single-conditioning with canny/depth or multi-conditioning with both. Apply tableDiffusion3ControlNetPipeline()
+
 """
 
 import argparse
