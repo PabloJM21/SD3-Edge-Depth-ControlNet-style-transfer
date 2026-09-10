@@ -66,12 +66,12 @@ DEFAULT_STEPS = 28
 DEFAULT_CANNY_SCALE = 1.0
 DEFAULT_DEPTH_SCALE = 1.0
 DEFAULT_SEED = 1234
-DEFAULT_NEGATIVE_PROMPT = "hallucinated details, artificial edges, extra geometry, random artifacts"
+DEFAULT_NEGATIVE_PROMPT = "unnatural colors not suited for realistic landscape images" #"hallucinated details, artificial edges, extra geometry, random artifacts"
 
 # Runway re-integration (SDXL inpainting) defaults.
 DEFAULT_INPAINT_MODEL = "OzzyGT/RealVisXL_V4.0_inpainting"
 DEFAULT_INPAINT_VAE_MODEL = "madebyollin/sdxl-vae-fp16-fix"
-DEFAULT_INPAINT_PROMPT = "Seamlessly integrated runway edges. Preservation of runway markings"
+DEFAULT_INPAINT_PROMPT = "Match the runway to the surrounding scene in tone, lighting, and atmosphere, while preserving all original runway geometry and surface details exactly."
 DEFAULT_INPAINT_NEGATIVE_PROMPT = ""
 DEFAULT_INPAINT_GUIDANCE_SCALE = 10.0
 DEFAULT_INPAINT_STRENGTH = 0.8
