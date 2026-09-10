@@ -538,10 +538,10 @@ def process_image(
         result = pipe(
             prompt=args.prompt,
             negative_prompt=args.negative_prompt,
-            image=image,
-            strength=args.scale,
             control_image=control_image_arg,
             controlnet_conditioning_scale=conditioning_scale_arg,
+            height=gen_height,
+            width=gen_width,
             num_inference_steps=args.steps,
             guidance_scale=guidance_scale,
             generator=generator,
