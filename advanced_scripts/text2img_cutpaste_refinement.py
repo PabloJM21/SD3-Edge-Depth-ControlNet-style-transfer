@@ -50,7 +50,7 @@ import torch.nn.functional as F
 from PIL import Image
 from diffusers import (
     AutoencoderKL,
-    StableDiffusion3ControlNetImg2ImgPipeline,
+    StableDiffusion3ControlNetPipeline,
     StableDiffusionXLInpaintPipeline,
 )
 from diffusers.models import SD3ControlNetModel, SD3MultiControlNetModel
@@ -400,7 +400,7 @@ def load_pipeline(args):
     else:
         controlnet = depth_controlnet
 
-    pipe = StableDiffusion3ControlNetImg2ImgPipeline.from_pretrained(
+    pipe = StableDiffusion3ControlNetPipeline.from_pretrained(
         args.sd3_model,
         controlnet=controlnet,
         torch_dtype=dtype,
