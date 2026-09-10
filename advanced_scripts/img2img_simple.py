@@ -146,7 +146,7 @@ def process_image(pipe, input_path, output_path, args):
             prompt=args.prompt,
             negative_prompt=args.negative_prompt,
             image=init_image,
-            strength=args.scale,
+            strength=args.strength,
             num_inference_steps=args.steps,
             guidance_scale=args.guidance_scale,
             generator=generator,
@@ -182,7 +182,7 @@ def main():
     print(f"Found {len(input_files)} input file(s).")
     print(f"Prompt:              {args.prompt!r}")
     print(f"Negative prompt:     {args.negative_prompt!r}")
-    print(f"Img2img strength:    {args.scale}")
+    print(f"Img2img strength:    {args.strength}")
     print(f"Guidance scale:      {args.guidance_scale}")
     print(f"Steps:               {args.steps}")
     print("Generation size:     native per-image")
